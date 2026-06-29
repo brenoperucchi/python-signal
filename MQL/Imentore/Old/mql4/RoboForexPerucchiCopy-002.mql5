@@ -1,0 +1,1641 @@
+//VERSAO BRENO 29/09/2019
+//+------------------------------------------------------------------+
+//|                     Automaticaly Copy and Delete Order           |
+//|                                Copyright 2019, V                 |
+//+------------------------------------------------------------------+
+#property version "1.0"
+#property copyright "Breno Perucchi - Copyright © 2019"
+#property description ""
+#property strict
+
+// Aqui tem algumas constantes que são equivalentes
+
+//#include <MT4Orders.mqh> // если есть #include <Trade/Trade.mqh>, вставить эту строчку ПОСЛЕ
+//#include <MQL4_to_MQL5.mqh> // ТОЛЬКО для данного примера
+
+//+------------------------------------------------------------------+
+//|                                                     InitMQL4.mqh |
+//|                                                 Copyright DC2008 |
+//|                                              https://www.mql5.com |
+//+------------------------------------------------------------------+
+#property copyright "keiji"
+#property copyright "DC2008"
+#property link      "https://www.mql5.com"
+//--- Declaration of constants
+#define OP_BUY 0           //Buy 
+#define OP_SELL 1          //Sell 
+#define OP_BUYLIMIT 2      //Pending order of BUY LIMIT type 
+#define OP_SELLLIMIT 3     //Pending order of SELL LIMIT type 
+#define OP_BUYSTOP 4       //Pending order of BUY STOP type 
+#define OP_SELLSTOP 5      //Pending order of SELL STOP type 
+//---
+#define MODE_OPEN 0
+#define MODE_CLOSE 3
+#define MODE_VOLUME 4 
+#define MODE_REAL_VOLUME 5
+#define MODE_TRADES 0
+#define MODE_HISTORY 1
+#define SELECT_BY_POS 0
+#define SELECT_BY_TICKET 1
+//---
+#define DOUBLE_VALUE 0
+#define FLOAT_VALUE 1
+#define LONG_VALUE INT_VALUE
+//---
+#define CHART_BAR 0
+#define CHART_CANDLE 1
+//---
+#define MODE_ASCEND 0
+#define MODE_DESCEND 1
+//---
+#define MODE_LOW 1
+#define MODE_HIGH 2
+#define MODE_TIME 5
+#define MODE_BID 9
+#define MODE_ASK 10
+#define MODE_POINT 11
+#define MODE_DIGITS 12
+#define MODE_SPREAD 13
+#define MODE_STOPLEVEL 14
+#define MODE_LOTSIZE 15
+#define MODE_TICKVALUE 16
+#define MODE_TICKSIZE 17
+#define MODE_SWAPLONG 18
+#define MODE_SWAPSHORT 19
+#define MODE_STARTING 20
+#define MODE_EXPIRATION 21
+#define MODE_TRADEALLOWED 22
+#define MODE_MINLOT 23
+#define MODE_LOTSTEP 24
+#define MODE_MAXLOT 25
+#define MODE_SWAPTYPE 26
+#define MODE_PROFITCALCMODE 27
+#define MODE_MARGINCALCMODE 28
+#define MODE_MARGININIT 29
+#define MODE_MARGINMAINTENANCE 30
+#define MODE_MARGINHEDGED 31
+#define MODE_MARGINREQUIRED 32
+#define MODE_FREEZELEVEL 33
+//---
+#define EMPTY -1
+
+// Required: MQL-ZMQ from https://github.com/dingmaotu/mql-zmq
+
+#include <Zmq/Zmq.mqh>
+//VERSION 2021-05-21 - 001
+
+extern string t0 = "--- Trading Parameters ---";
+extern int MaximumOrders = 1;
+extern double MaximumLotSize = 0.01;
+extern int MaximumSlippage = 3;
+extern bool DMA_MODE = true;
+
+//+------------------------------------------------------------------+
+//| Enumerator of working mode                                       |
+//+------------------------------------------------------------------+
+input int slip=3;                // Slippage (in pips)
+input double mult=1.0;           // Multiplier (for copied trade)
+input uint delay=1000;            // Check frequency (milliseconds)
+input string prefix="";     // Copied trade comment prefix
+input int maxAge=10;             // Max age of the trade to be copied in sec
+input string CommentCopy="";     // CommentPrefix to should be copy
+
+int    prev_ordersize         = 0;
+int    ordersize              = 0;
+int    changed                = 0;
+
+//--- Globales ZMQ
+
+string zmq_server        = "";
+uint   zmq_subdelay      = 0;
+bool   zmq_runningstatus = false;
+
+// string PROJECT_NAME = "DWX_ZeroMQ_MT4_Server";
+string ZEROMQ_PROTOCOL = "tcp";
+string HOSTNAME = "192.168.1.240";
+int PUSH_PORT = 5550;
+int PULL_PORT = 5551;
+int PUB_PORT = 32770;
+int MILLISECOND_TIMER = 1;
+int MILLISECOND_TIMER_PRICES = 500;
+
+
+Context context("helloworld");
+
+// // CREATE ZeroMQ Context
+// Context context(PROJECT_NAME);
+
+ // CREATE ZMQ_PUSH SOCKET
+ Socket pushSocket(context, ZMQ_PUSH);
+
+ // CREATE ZMQ_PULL SOCKET
+ Socket pullSocket(context, ZMQ_PULL);
+
+// // CREATE ZMQ_PUB SOCKET
+// Socket pubSocket(context, ZMQ_PUB);
+
+// // VARIABLES FOR LATER
+// long lastUpdateMillis = GetTickCount();
+// uchar _data[];
+// ZmqMsg request;
+
+
+// Prepare our context and socket
+
+// Socket socket(context, ZMQ_REQ);
+
+
+//+------------------------------------------------------------------+
+//|                                                                  |
+//+------------------------------------------------------------------+
+class OrderContainer
+  {
+public:
+   int               ticket;
+   int               copiedFrom;
+   string            symbol;
+   int               type;
+   double            price;
+   double            lot;
+   double            stoploss;
+   double            takeprofit;
+   datetime          opentime;
+   string            comment;
+
+                     OrderContainer(void);
+                    ~OrderContainer(void)
+     {
+     }
+
+                     OrderContainer(int pticket,
+                  string psymbol,
+                  int ptype,
+                  double pprice,
+                  double plot,
+                  double pstoploss,
+                  double ptakeprofit,
+                  datetime popentime,
+                  string pcomment)
+     {
+      ticket = pticket;
+      symbol = psymbol;
+      type=ptype;
+      price=pprice;
+      lot=plot;
+      stoploss=pstoploss;
+      takeprofit=takeprofit;
+      opentime= popentime;
+      comment = pcomment;
+
+      if(StringSubstr(pcomment,0,StringLen(prefix))==prefix)
+        {
+         copiedFrom=StringToInteger(StringSubstr(pcomment,StringLen(prefix)));
+        }
+     }
+  };
+
+
+
+
+//+------------------------------------------------------------------+
+//|Initialisation function                                           |
+//+------------------------------------------------------------------+
+void OnInit()
+  {
+   while(!IsStopped())
+     {
+      string cookie=NULL,headers;
+   char   post[],result[];
+   string url="http://192.168.1.240/api/v1/traces";
+//--- para trabalhar com o servidor é necessário adicionar a URL "https://finance.yahoo.com"
+//--- na lista de URLs permitidas (menu Principal->Ferramentas->Opções, guia "Experts"):
+//--- redefinimos o código do último erro
+   ResetLastError();
+//--- download da página html do Yahoo Finance
+   int res=WebRequest("GET",url,cookie,NULL,500,post,0,result,headers);
+   if(res==-1)
+     {
+      Print("Erro no WebRequest. Código de erro =",GetLastError());
+      //--- é possível que a URL não esteja na lista, exibimos uma mensagem sobre a necessidade de adicioná-la
+      MessageBox("É necessário adicionar um endereço '"+url+"' à lista de URL permitidas na guia 'Experts'","Erro",MB_ICONINFORMATION);
+     }
+   else
+     {
+      if(res==200)
+        {
+         string result2 = CharArrayToString(result);
+         Print(result2);
+         string messagedata[];
+         int    size = StringSplit(result2, "/", messagedata);        
+         Print(size);
+         //--- download bem-sucedido
+         //PrintFormat("O arquivo foi baixado com sucesso, tamanho %d bytes.",ArraySize(result));
+         //PrintFormat("Cabeçalhos do servidor: %s",headers);
+         //--- salvamos os dados em um arquivo
+         //int filehandle=FileOpen("url.htm",FILE_WRITE|FILE_BIN);
+         //if(filehandle!=INVALID_HANDLE)
+         //  {
+         //   //--- armazenamos o conteúdo do array result[] no arquivo
+         //   FileWriteArray(filehandle,result,0,ArraySize(result));
+         //   //--- fechamos o arquivo
+         //   FileClose(filehandle);
+         //  }
+         //else
+         //   Print("Erro em FileOpen. Código de erro =",GetLastError());
+        }
+      else
+         PrintFormat("Erro de download '%s', código %d",url,res);
+     }
+  
+  
+  }
+  
+  
+  
+    //Print("Connecting to hello world server…");
+    //// socket.connect("tcp://192.168.1.240:5555");
+    //pushSocket.connect("tcp://192.168.1.240:5551");
+    //pullSocket.connect("tcp://192.168.1.240:5550");
+
+    // // Send responses to PULL_PORT that client is listening on.
+    //    if(!pushSocket.connect(StringFormat("%s://%s:%d", ZEROMQ_PROTOCOL, HOSTNAME, PULL_PORT)))
+    //      {
+    //       Print("[PUSH] ####ERROR#### Binding MT4 Server to Socket on Port " + IntegerToString(PULL_PORT) + "..");
+    //       return;
+    //      }
+    //    else
+    //      {
+    //       Print("[PUSH] Binding MT4 Server to Socket on Port " + IntegerToString(PULL_PORT) + "..");
+    //       pushSocket.setSendHighWaterMark(1);
+    //       pushSocket.setLinger(0);
+    //      }
+
+    // // Receive commands from PUSH_PORT that client is sending to.
+    //    if(!pullSocket.connect(StringFormat("%s://%s:%d", ZEROMQ_PROTOCOL, HOSTNAME, PUSH_PORT)))
+    //      {
+    //       Print("[PULL] ####ERROR#### Binding MT4 Server to Socket on Port " + IntegerToString(PUSH_PORT) + "..");
+    //       return;
+    //      }
+    //    else
+    //      {
+    //       Print("[PULL] Binding MT4 Server to Socket on Port " + IntegerToString(PUSH_PORT) + "..");
+    //       pullSocket.setReceiveHighWaterMark(1);
+    //       pullSocket.setLinger(0);
+    //      }
+
+    // // Send new market data to PUB_PORT that client is subscribed to.
+    //    if(!pubSocket.connect(StringFormat("%s://%s:%d", ZEROMQ_PROTOCOL, HOSTNAME, PUB_PORT)))
+    //      {
+    //       Print("[PUB] ####ERROR#### Binding MT4 Server to Socket on Port " + IntegerToString(PUB_PORT) + "..");
+    //       return;
+    //      }
+    //    else
+    //      {
+    //       Print("[PUB] Binding MT4 Server to Socket on Port " + IntegerToString(PUB_PORT) + "..");
+    //       pubSocket.setSendHighWaterMark(1);
+    //       pubSocket.setLinger(0);
+    //      }
+    //    ObjectsDeleteAll();
+
+       uint ticketstart = 0;
+   uint tickcount   = 0;
+   int severTimeShift = 0;
+   
+   prev_ordersize = 0;
+   ordersize = OrdersTotal();
+   prev_ordersize = ordersize;
+
+ GetCurrentOrdersOnStart();
+
+//   while(!IsStopped())
+//     {
+//      string components[11];
+//      // isNewBar(Time[0]);
+//      // pullSocket.recv(request, true);
+//      // ArrayResize(_data, request.size());
+//
+//      // request.getData(_data);
+//      // string dataStr = CharArrayToString(_data);
+//      // printf(dataStr);
+//
+//      // Do 10 requests, waiting each time for a response
+//      ZmqMsg request("Client");
+//      pushSocket.send(request);
+//
+//      // Get the reply.
+//      ZmqMsg reply;
+//      pullSocket.recv(reply,false);
+//
+//      if(reply.size() > 0)
+//        {
+//          string message = reply.getData();
+//          Print("Server MSG: ",message);
+//          ParseZmqMessage(message, components);
+//          InterpretZmqMessage(pushSocket, components);
+//      //    // Wait
+//      //    // pullSocket.recv(request,false);
+//
+//      //    // MessageHandler() should go here.
+//      //    ZmqMsg reply = MessageHandler(request);
+//      //    //pushSocket.send(GetTickCount(), true);
+//      //    // Send response, and block
+//      //    // pushSocket.send(reply);
+//
+//      //    // Send response, but don't block
+//      //    if(!pushSocket.send(reply, true))
+//      //      {
+//      //       Print("###ERROR### Sending message");
+//      //      }
+//         }
+//
+//      // update prices regularly in case there was no tick within X milliseconds (for non-chart symbols).
+//      // if(GetTickCount() >= lastUpdateMillis + MILLISECOND_TIMER_PRICES);
+//      // ticketstart = GetTickCount();
+//
+//      StateOfOrder();
+//      int orderCount=OrdersTotal();
+//
+//      // tickcount = GetTickCount() - ticketstart;
+//
+//      // if (delay > tickcount)
+//      //   Sleep(delay-tickcount-2);
+//
+//     }
+  }
+//+------------------------------------------------------------------+
+//|Deinitialisation function                                         |
+//+------------------------------------------------------------------+
+void OnDeinit(const int reason)
+  {
+    Print("Disconnect to hello world server…");
+    // socket.disconnect("tcp://192.168.1.240:5555");
+    pushSocket.disconnect("tcp://192.168.1.240:5550");
+    pullSocket.disconnect("tcp://192.168.1.240:5551");
+
+   //StopZmqClient();
+
+   // Print("[PUSH] Unbinding MT4 Server from Socket on Port " + IntegerToString(PULL_PORT) + "..");
+   // //pushSocket.unbind(StringFormat("%s://%s:%d", ZEROMQ_PROTOCOL, HOSTNAME, PULL_PORT));
+   // pushSocket.disconnect(StringFormat("%s://%s:%d", ZEROMQ_PROTOCOL, HOSTNAME, PULL_PORT));
+
+   // Print("[PULL] Unbinding MT4 Server from Socket on Port " + IntegerToString(PUSH_PORT) + "..");
+   // //pullSocket.unbind(StringFormat("%s://%s:%d", ZEROMQ_PROTOCOL, HOSTNAME, PUSH_PORT));
+   // pullSocket.disconnect(StringFormat("%s://%s:%d", ZEROMQ_PROTOCOL, HOSTNAME, PUSH_PORT));
+
+   // Print("[PUB] Unbinding MT4 Server from Socket on Port " + IntegerToString(PUB_PORT) + "..");
+   // //pubSocket.unbind(StringFormat("%s://%s:%d", ZEROMQ_PROTOCOL, HOSTNAME, PUB_PORT));
+   // pubSocket.disconnect(StringFormat("%s://%s:%d", ZEROMQ_PROTOCOL, HOSTNAME, PUB_PORT));
+
+
+// Shutdown ZeroMQ Context
+   context.shutdown();
+   //context.destroy(0);
+   //ObjectsDeleteAll();
+   return;
+  }
+
+
+//+------------------------------------------------------------------+
+//|                                                                  |
+//+------------------------------------------------------------------+
+
+
+/*********************************************************
+* Bar Functions
+**********************************************************/
+void isNewBar(datetime now) {
+      //datetime timeToUpdate = Time[0] + (Period() * 60) + severTimeShift;
+      
+      // waits for the next run
+      //while (! IsStopped() && (Time[0]+ severTimeShift) < timeToUpdate) {
+      //   Comment("New candle in ", (timeToUpdate - TimeLocal()), " seconds." );
+      //   Sleep(200);
+      //   RefreshRates();         
+      //}
+   }
+
+// int OnStart(void)
+//   {
+//   }
+//+------------------------------------------------------------------+
+//| Get all of the orders                                            |
+//+------------------------------------------------------------------+
+//int GetCurrentOrdersOnTicket()
+void StateOfOrder()
+  {
+   ordersize = OrdersTotal();
+   OrderContainer *orders[100];
+
+   if(ordersize > prev_ordersize)
+     {
+      // Trade has been added
+      //PushOpenOrder(orders);
+      //InformPullClient(pullSocket, "{'_send': PULL ''}");
+      //pullSocket.send("teste");
+      GetCurrentOrdersOnStart();
+     }
+   else
+      if(ordersize < prev_ordersize)
+        {
+         // Trade has been closed
+         PushCloseOrder(orders);
+         GetCurrentOrdersOnStart();
+        }
+  }
+
+//+------------------------------------------------------------------+
+//|                                                                  |
+//+------------------------------------------------------------------+
+void PushOpenOrder(OrderContainer* &orders[])
+  {
+   int orderCount=OrdersTotal();
+   GetOrders(orders);
+//   if(!OrderSelect((OrdersTotal() -1), SELECT_BY_POS))
+//      return;
+////Print(OrderComment());
+//   if(CommentCopy == OrderComment())
+//      OpenMarketOrder(OrderTicket(),OrderSymbol(), OrderType(),OrderOpenPrice(),(OrderLots() *mult));
+  }
+
+
+//+------------------------------------------------------------------+
+//|                                                                  |
+//+------------------------------------------------------------------+
+void PushCloseOrder(OrderContainer* &orders[])
+  {
+//   int orderCount=OrdersTotal();
+//   GetOrders(orders);
+//   
+//   string order_select = OrderSelect(OrdersHistoryTotal()-1, SELECT_BY_POS,MODE_HISTORY);
+//   string order_ticket = OrderTicket();
+   //pushSocket.send(StringFormat("%d %s|%s|%d|%d|%f|%f|%f|%f|%f",
+   //                             AccountInfoInteger(ACCOUNT_LOGIN),
+   //                             "CLOSED",
+   //                             OrderSymbol(),
+   //                             OrderTicket(),
+   //                             OrderType(),
+   //                             OrderOpenPrice(),
+   //                             OrderClosePrice(),
+   //                             OrderLots(),
+   //                             OrderStopLoss(),
+   //                             OrderTakeProfit()
+   //                            ));
+
+   // for(int i=0; i<orderCount; i++)
+   //   {
+   //    int orderCloseReturnValue=-1;
+
+   //    int commentID = StringToInteger(StringSubstr(orders[i].comment,StringLen(prefix)));
+   //    bool toClose=true;
+   //    if(StringSubstr((orders[i]).comment,0,StringLen(prefix))==prefix)
+   //      {
+   //       for(int j=0; j<orderCount; j++)
+   //         {
+   //          if(orders[j].ticket == commentID)
+   //             toClose=false;
+   //         }
+   //       if(toClose)
+   //         {
+   //          if(OrderSelect(orders[i].ticket, SELECT_BY_TICKET)==true)
+   //            {
+   //             Print("order", OrderTicket(), "open price is ", OrderOpenPrice());
+   //             Print("order", OrderTicket(), "close price is ", OrderClosePrice());
+   //             if(OrderType()<2)
+   //                orderCloseReturnValue=OrderClose(OrderTicket(),OrderLots(),OrderClosePrice(),slip);
+   //             else
+   //                orderCloseReturnValue=OrderDelete(OrderTicket());
+   //             //--------------------------------
+
+   //            }
+   //          else
+   //             Print("OrderSelect returned the error of ",GetLastError());
+
+   //          if(orderCloseReturnValue==-1)
+   //            {
+   //             Print("Error: ",GetLastError()," during closing the market order.");
+   //            }
+   //          else
+   //            {
+   //             OrderPrint();
+   //             Print("Market order ",IntegerToString(OrderTicket())," (",OrderComment(),") closed as parent trade was also closed.");
+   //            }
+   //         }
+
+   //      }
+   //   }
+  }
+
+//+------------------------------------------------------------------+
+//|Open market execution orders                                      |
+//+------------------------------------------------------------------+
+void OpenMarketOrder(int ticket_,string symbol_,int type_,double price_,double lot_)
+  {
+//   int orderSendReturnValue=-1;
+//   double market_price=MarketInfo(symbol_,MODE_BID);
+//   if(type_==0)
+//      market_price=MarketInfo(symbol_,MODE_ASK);
+//   double delta;
+//   double market_info = MarketInfo(symbol_,MODE_POINT);
+//   delta=MathAbs(market_price-price_)/market_info;
+//   OrderPrint();
+//
+//   if(type_ < 2)
+//     {
+//      orderSendReturnValue=OrderSend(symbol_,type_,lot_,market_price,slip,0,0,prefix+IntegerToString(ticket_),0,0,clrYellow);
+//     }
+//   else
+//     {
+//      if(delta<slip)
+//         return;
+//
+//      orderSendReturnValue=OrderSend(symbol_,type_,lot_,price_,slip,0,0,prefix+IntegerToString(ticket_),0,0,clrYellow);
+//      //OrderSend(symbol, OP_BUY, vlots, vprice, order_slippage, sl, tp, comment, 0, 0, clrYellow);
+//     }
+//   if(orderSendReturnValue==-1)
+//     {
+//      Print("Error: ",GetLastError()," during opening the market order.");
+//     }
+//   else
+//     {
+//      Print("Market order ",IntegerToString(ticket_)," copied as ",prefix+IntegerToString(ticket_),".");
+//     }
+   return;
+  }
+
+
+//+------------------------------------------------------------------+
+//|                                                                  |
+//+------------------------------------------------------------------+
+void GetOrders(OrderContainer* &orders[])
+  {
+//OrderContainer *orders[100];
+   int orderCount=OrdersTotal();
+
+   if(orderCount==0)
+      return;
+
+//--- Saving information about all deals
+   //for(int i=0; i<orderCount; i++)
+   //  {
+   //   if(!OrderSelect(i,SELECT_BY_POS))
+   //      break;
+   //   orders[i]=new OrderContainer(OrderTicket(),OrderSymbol(),OrderType(),OrderOpenPrice(),OrderLots(),OrderStopLoss(),OrderTakeProfit(),OrderOpenTime(),OrderComment());
+   //  }
+  }
+
+
+//+------------------------------------------------------------------+
+//| Get all of the orders                                            |
+//+------------------------------------------------------------------+
+void GetCurrentOrdersOnStart()
+  {
+   prev_ordersize = 0;
+   ordersize = OrdersTotal();
+
+   if(ordersize == prev_ordersize)
+      return;
+
+   prev_ordersize = ordersize;
+
+  }
+
+
+
+//+------------------------------------------------------------------+
+
+//+------------------------------------------------------------------+
+//|                                                                  |
+//+------------------------------------------------------------------+
+// ZmqMsg MessageHandler(ZmqMsg &_request)
+//   {
+
+// // Output object
+//    ZmqMsg reply;
+
+// // Message components for later.
+//    string components[11];
+
+//    if(_request.size() > 0)
+//      {
+
+//       // Get data from request
+//       ArrayResize(_data, _request.size());
+//       _request.getData(_data);
+//       string dataStr = CharArrayToString(_data);
+//       printf(dataStr);      
+
+//       // Process data
+//       ParseZmqMessage(dataStr, components);
+
+//       // Interpret data
+//       InterpretZmqMessage(pushSocket, components);
+
+//      }
+//    else
+//      {
+//       // NO DATA RECEIVED
+//      }
+
+//    return(reply);
+//   }
+
+
+//+------------------------------------------------------------------+
+
+// Inform Client
+void InformPullClient(Socket& pSocket, string message)
+  {
+
+   ZmqMsg pushReply(message);
+
+   //pushSocket.send(pushReply,true); // NON-BLOCKING
+
+  }
+
+
+//+------------------------------------------------------------------+
+//| Parse the message from server signal                             |
+//+------------------------------------------------------------------+
+bool ParseMessage(const string message,
+                  int &login,
+                  string &orderdata)
+  {
+   if(message == "")
+      return false;
+
+   string messagedata[];
+   int    size = StringSplit(message, ' ', messagedata);
+
+   login = -1;
+   orderdata = "";
+
+   if(size != 2)
+      return false;
+
+   login = StringToInteger(messagedata[0]);
+   orderdata = messagedata[1];
+
+   return true;
+  }
+//+------------------------------------------------------------------+
+//+------------------------------------------------------------------+
+// Interpret Zmq Message and perform actions
+void InterpretZmqMessage(Socket &pSocket, string &compArray[]) {
+
+   // Message Structures:
+   
+   // 1) Trading
+   // TRADE|ACTION|TYPE|SYMBOL|PRICE|SL|TP|COMMENT|TICKET
+   // e.g. TRADE|OPEN|1|EURUSD|0|50|50|R-to-MetaTrader4|12345678
+   
+   // The 12345678 at the end is the ticket ID, for MODIFY and CLOSE.
+   
+   // 2) Data Requests
+   
+   // 2.1) RATES|SYMBOL   -> Returns Current Bid/Ask
+   
+   // 2.2) DATA|SYMBOL|TIMEFRAME|START_DATETIME|END_DATETIME
+   
+   // 2.3) HIST|SYMBOL|TIMEFRAME|START_DATETIME|END_DATETIME
+   
+   // 3) Instruments configuration
+   
+   // 3.1) TRACK_PRICES|SYMBOL_1|SYMBOL_2|...|SYMBOL_N  -> List of symbols to receive real-time price updates (bid-ask)
+
+   // 3.2) TRACK_RATES|INSTRUMENT_1|INSTRUMENT_2|...|INSTRUMENT_N  -> List of instruments to receive OHLC rates
+           // Note: Instruments are bilt with format: SYMBOL_TIMEFRAME for example:
+           //       Symbol: EURUSD, Timeframe: PERIOD_M1 ----> Instrument = "EURUSD_M1"          
+           //       Symbol: GDAXI,  Timeframe: PERIOD_H4 ----> Instrument = "GDAXI_H4"
+   
+   // NOTE: datetime has format: D'2015.01.01 00:00'
+   
+   /*
+      compArray[0] = TRADE, HIST, TRACK_PRICES, TRACK_RATES
+      If HIST, TRACK_PRICES, TRACK_RATES -> compArray[1] = Symbol
+      
+      If TRADE ->
+         compArray[0] = TRADE
+         compArray[1] = ACTION (e.g. OPEN, MODIFY, CLOSE)
+         compArray[2] = TYPE (e.g. OP_BUY, OP_SELL, etc - only used when ACTION=OPEN)
+         
+         // ORDER TYPES: 
+         // https://docs.mql4.com/constants/tradingconstants/orderproperties
+         
+         // OP_BUY = 0
+         // OP_SELL = 1
+         // OP_BUYLIMIT = 2
+         // OP_SELLLIMIT = 3
+         // OP_BUYSTOP = 4
+         // OP_SELLSTOP = 5
+         
+         compArray[3] = Symbol (e.g. EURUSD, etc.)
+         compArray[4] = Open/Close Price (ignored if ACTION = MODIFY)
+         compArray[5] = SL
+         compArray[6] = TP
+         compArray[7] = Trade Comment
+         compArray[8] = Lots
+         compArray[9] = Magic Number
+         compArray[10] = Ticket Number (MODIFY/CLOSE)
+   */
+   
+   int switch_action = 0;
+   
+   /* 02-08-2019 10:41 CEST - HEARTBEAT */
+   if(compArray[0] == "HEARTBEAT")
+      InformPullClient(pSocket, "{'_action': 'heartbeat', '_response': 'loud and clear!'}");
+      
+   /* Process Messages */
+   if(compArray[0] == "TRADE" && compArray[1] == "OPEN")
+      switch_action = 1;
+   if(compArray[0] == "TRADE" && compArray[1] == "MODIFY")
+      switch_action = 2;
+   if(compArray[0] == "TRADE" && compArray[1] == "CLOSE")
+      switch_action = 3;
+   if(compArray[0] == "TRADE" && compArray[1] == "CLOSE_PARTIAL")
+      switch_action = 4;
+   if(compArray[0] == "TRADE" && compArray[1] == "CLOSE_MAGIC")
+      switch_action = 5;
+   if(compArray[0] == "TRADE" && compArray[1] == "CLOSE_ALL")
+      switch_action = 6;
+   if(compArray[0] == "TRADE" && compArray[1] == "GET_OPEN_TRADES")
+      switch_action = 7;
+   if(compArray[0] == "HIST")
+      switch_action = 8;
+   if(compArray[0] == "TRACK_PRICES")
+      switch_action = 9;
+   if(compArray[0] == "TRACK_RATES")
+      switch_action = 10;
+   
+   // IMPORTANT: when adding new functions, also increase the max switch_action in CheckOpsStatus()!
+   
+   /* Setup processing variables */
+   string zmq_ret = "";
+   string ret = "";
+   int ticket = -1;
+   bool ans = false;
+   
+   /****************************
+    * PERFORM SOME CHECKS HERE *
+    ****************************/
+   if (CheckOpsStatus(pSocket, switch_action) == true) {
+   
+      switch(switch_action) {
+         case 1: // OPEN TRADE
+            
+            zmq_ret = "{";
+            
+            // Function definition:
+            ticket = DWX_OpenOrder(compArray[3], StringToInteger(compArray[2]), StringToDouble(compArray[8]), StringToDouble(compArray[4]), 
+                                   StringToInteger(compArray[5]), StringToInteger(compArray[6]), compArray[7], StringToInteger(compArray[9]), zmq_ret);
+                                    
+            // Send TICKET back as JSON
+            InformPullClient(pSocket, zmq_ret + "}");
+            
+            break;
+
+
+         case 2: // MODIFY SL/TP
+      
+            zmq_ret = "{'_action': 'MODIFY'";
+            
+            // Function definition:
+            ans = DWX_ModifyOrder(StringToInteger(compArray[10]), StringToDouble(compArray[4]), StringToDouble(compArray[5]), StringToDouble(compArray[6]), 3, zmq_ret);
+            
+            InformPullClient(pSocket, zmq_ret + "}");
+            
+            break;
+         
+         case 3: // CLOSE TRADE
+      
+            zmq_ret = "{";
+            
+            // IMPLEMENT CLOSE TRADE LOGIC HERE
+            DWX_CloseOrder_Ticket(StringToInteger(compArray[10]), zmq_ret);
+            
+            InformPullClient(pSocket, zmq_ret + "}");
+            
+            break;
+         
+         case 4: // CLOSE PARTIAL
+      
+            zmq_ret = "{";
+            
+            ans = DWX_ClosePartial(StringToDouble(compArray[8]), zmq_ret, StringToInteger(compArray[10]), true);
+
+            InformPullClient(pSocket, zmq_ret + "}");
+            
+            break;
+         
+         case 5: // CLOSE MAGIC
+      
+            zmq_ret = "{";
+            
+            DWX_CloseOrder_Magic(StringToInteger(compArray[9]), zmq_ret);
+               
+            InformPullClient(pSocket, zmq_ret + "}");
+            
+            break;
+            
+         case 6: // CLOSE ALL ORDERS
+      
+            zmq_ret = "{";
+            
+            DWX_CloseAllOrders(zmq_ret);
+               
+            InformPullClient(pSocket, zmq_ret + "}");
+            
+            break;
+            
+         case 7: // GET OPEN ORDERS
+      
+            zmq_ret = "{";
+            
+            DWX_GetOpenOrders(zmq_ret);
+               
+            InformPullClient(pSocket, zmq_ret + "}");
+            
+            break;
+         
+         case 8: // HIST REQUEST
+         
+            zmq_ret = "{";
+            
+            //DWX_GetHist(compArray, zmq_ret);
+            
+            InformPullClient(pSocket, zmq_ret + "}");
+            
+            break;
+           
+         case 9: // SETUP LIST OF SYMBOLS TO TRACK PRICES
+            
+            zmq_ret = "{";
+            
+            //DWX_SetSymbolList(compArray, zmq_ret);
+            
+            InformPullClient(pSocket, zmq_ret + "}");
+            
+            break;
+              
+         case 10: // SETUP LIST OF INSTRUMENTS TO TRACK RATES
+            
+            zmq_ret = "{";
+            
+            //DWX_SetInstrumentList(compArray, zmq_ret);
+            
+            InformPullClient(pSocket, zmq_ret + "}");
+            
+            break;
+        
+         // if a case is added, also change max switch_action in CheckOpsStatus()!
+            
+         default: 
+            break;
+      }
+   }
+}
+
+
+// Check if operations are permitted
+bool CheckOpsStatus(Socket &pSocket, int switch_action) {
+
+   if (switch_action >= 1 && switch_action <= 10) {
+   
+      if (!MQL5_TRADE_ALLOWED) {
+         InformPullClient(pSocket, "{'_response': 'TRADING_IS_NOT_ALLOWED__ABORTED_COMMAND'}");
+         return(false);
+      }
+      else if (!ACCOUNT_TRADE_EXPERT) {
+         InformPullClient(pSocket, "{'_response': 'EA_IS_DISABLED__ABORTED_COMMAND'}");
+         return(false);
+      }
+      //else if (IsTradeContextBusy()) {
+      //   InformPullClient(pSocket, "{'_response': 'TRADE_CONTEXT_BUSY__ABORTED_COMMAND'}");
+      //   return(false);
+      //}
+      else if (!TERMINAL_DLLS_ALLOWED) {
+         InformPullClient(pSocket, "{'_response': 'DLLS_DISABLED__ABORTED_COMMAND'}");
+         return(false);
+      }
+      else if (!MQL5_DLLS_ALLOWED) {
+         InformPullClient(pSocket, "{'_response': 'LIBS_DISABLED__ABORTED_COMMAND'}"); 
+         return(false);
+      }
+      else if (!TERMINAL_CONNECTED) {
+         InformPullClient(pSocket, "{'_response': 'NO_BROKER_CONNECTION__ABORTED_COMMAND'}");
+         return(false);
+      }
+   }
+   
+   return(true);
+}
+
+// Parse Zmq Message
+void ParseZmqMessage(string& message, string& retArray[]) {
+   
+   //Print("Parsing: " + message);
+   
+   string sep = ";";
+   ushort u_sep = StringGetCharacter(sep,0);
+   
+   int splits = StringSplit(message, u_sep, retArray);
+   
+   /*
+   for(int i = 0; i < splits; i++) {
+      Print(IntegerToString(i) + ") " + retArray[i]);
+   }
+   */
+}
+
+
+// OPEN NEW ORDER
+int DWX_OpenOrder(string _symbol, int _type, double _lots, double _price, double _SL, double _TP, string _comment, int _magic, string &zmq_ret) {
+   
+   int ticket, error;
+   string type = NormalizeType(_type);
+   
+   zmq_ret = zmq_ret + "'_action': 'EXECUTION'";
+   
+   if(_lots > MaximumLotSize) {
+      zmq_ret = zmq_ret + ", " + "'_response': 'LOT_SIZE_ERROR', 'response_value': 'MAX_LOT_SIZE_EXCEEDED'";
+      return(-1);
+   }
+   
+   double sl = _SL;
+   double tp = _TP;
+  
+   //if (type  == "OP_BUY") 
+   //   _price = MarketInfo(_symbol, MODE_ASK);
+   //else if (type == "OP_SELL") 
+   //   _price = MarketInfo(_symbol, MODE_BID);
+  
+   //double sl = 0.0;
+   //double tp = 0.0;
+  
+  
+  
+   // Else
+   if(DMA_MODE) {
+      sl = 0.0;
+      tp = 0.0;
+   } 
+   
+   if(_symbol == "NULL") {
+      ticket = OrderSend(Symbol(), _type, _lots, _price, MaximumSlippage, sl, tp, _comment, _magic);
+   } else {
+      ticket = OrderSend(_symbol, _type, _lots, _price, MaximumSlippage, sl, tp, _comment, _magic);
+   }
+   if(ticket < 0) {
+      // Failure
+      error = GetLastError();
+      zmq_ret = zmq_ret + ", " + "'_response': '" + IntegerToString(error) + "', 'response_value': '" + ErrorDescription(error) + "'";
+      return(-1*error);
+   }
+
+   int tmpRet = OrderSelect(ticket, SELECT_BY_TICKET, MODE_TRADES);
+   
+   zmq_ret = zmq_ret + ", " + "'_magic': " + IntegerToString(_magic) + ", '_ticket': " + IntegerToString(OrderTicket()) + ", '_open_time': '" + TimeToStr(OrderOpenTime(),TIME_DATE|TIME_SECONDS) + "', '_open_price': " + DoubleToString(OrderOpenPrice());
+
+   if(DMA_MODE) {
+   
+      int retries = 3;
+      while(true) {
+         retries--;
+         if(retries < 0) return(0);
+         
+         if((_SL == 0 && _TP == 0) || (OrderStopLoss() == _SL && OrderTakeProfit() == _TP)) {
+            return(ticket);
+         }
+
+         if(DWX_IsTradeAllowed(30, zmq_ret) == 1) {
+            if(DWX_SetSLTP(ticket, _SL, _TP, _magic, _type, _price, _symbol, retries, zmq_ret)) {
+               return(ticket);
+            }
+            if(retries == 0) {
+               zmq_ret = zmq_ret + ", '_response': 'ERROR_SETTING_SL_TP'";
+               return(-11111);
+            }
+         }
+
+         Sleep(MILLISECOND_TIMER);
+      }
+
+      zmq_ret = zmq_ret + ", '_response': 'ERROR_SETTING_SL_TP'";
+      zmq_ret = zmq_ret + "}";
+      return(-1);
+   }
+
+    // Send zmq_ret to Python Client
+    zmq_ret = zmq_ret + "}";
+    
+   return(ticket);
+}
+
+// SET SL/TP
+bool DWX_SetSLTP(int ticket, double _SL, double _TP, int _magic, int _type, double _price, string _symbol, int retries, string &zmq_ret) {
+   
+   if (OrderSelect(ticket, SELECT_BY_TICKET) == true)
+   {
+      int dir_flag = -1;
+      
+      if (OrderType() == 0 || OrderType() == 2 || OrderType() == 4)
+         dir_flag = 1;
+    
+      double vpoint  = MarketInfo(OrderSymbol(), MODE_POINT);
+      int    vdigits = (int)MarketInfo(OrderSymbol(), MODE_DIGITS);
+      
+      if(OrderModify(ticket, OrderOpenPrice(), NormalizeDouble(OrderOpenPrice()-_SL*dir_flag*vpoint,vdigits), NormalizeDouble(OrderOpenPrice()+_TP*dir_flag*vpoint,vdigits), 0, 0)) {
+         zmq_ret = zmq_ret + ", '_sl': " + DoubleToString(_SL) + ", '_tp': " + DoubleToString(_TP);
+         return(true);
+      } else {
+         int error = GetLastError();
+         zmq_ret = zmq_ret + ", '_response': '" + IntegerToString(error) + "', '_response_value': '" + ErrorDescription(error) + "', '_sl_attempted': " + NormalizeDouble(OrderOpenPrice()-_SL*dir_flag*vpoint,vdigits) + ", '_tp_attempted': " + NormalizeDouble(OrderOpenPrice()+_TP*dir_flag*vpoint,vdigits);
+   
+         if(retries == 0) {
+            RefreshRates();
+            DWX_CloseAtMarket(-1, zmq_ret);
+            // int lastOrderErrorCloseTime = TimeCurrent();
+         }
+         
+         return(false);
+      }
+   }    
+   
+   // return(true);
+   return(false);
+}
+// NORMALIZE TYPE
+
+string NormalizeType(int type){
+   string returned;
+
+   switch(type)
+     {
+      case  0:
+        returned =  "OP_BUY";
+        break;        
+      case 1:
+        returned =  "OP_SELL";        
+        break;        
+      case 2:
+        returned =  "OP_BUYLIMIT";
+        break;        
+      case 3:
+        returned =  "OP_SELLLIMIT";
+        break;        
+      case 4:
+        returned =  "OP_BUYSTOP";
+        break;
+      case 5:
+        returned =  "OP_SELLSTOP";
+        break;
+     }
+   return returned;
+ }
+
+//int DWX_OpenOrder(string _symbol, int _type, double _lots, double _price, double _SL, double _TP, string _comment, int _magic, string &zmq_ret) {
+//   
+//   int ticket;//, error;
+//   
+//   zmq_ret = zmq_ret + "'_action': 'EXECUTION'";
+//   
+//   if(_lots > MaximumLotSize) {
+//      zmq_ret = zmq_ret + ", " + "'_response': 'LOT_SIZE_ERROR', 'response_value': 'MAX_LOT_SIZE_EXCEEDED'";
+//      return(-1);
+//   }
+//   
+//   if(OrdersTotal() >= MaximumOrders) {
+//      zmq_ret = zmq_ret + ", " + "'_response': 'NUM_ORDERS_ERROR', 'response_value': 'MAX_NUMBER_OF_ORDERS_EXCEEDED'";
+//      return(-1);
+//   }
+//   
+//   //if (_type == OP_BUY) 
+//   //   _price = MarketInfo(_symbol, MODE_ASK);
+//   //else if (_type == OP_SELL) 
+//   //   _price = MarketInfo(_symbol, MODE_BID);
+//
+//   
+//   double sl = 0.0;
+//   double tp = 0.0;
+//  
+//   if(!DMA_MODE) {
+//      int dir_flag = -1;
+//      
+//      if (_type == OP_BUY || _type == OP_BUYLIMIT || _type == OP_BUYSTOP)
+//         dir_flag = 1;
+//      
+//      //double vpoint  = MarketInfo(_symbol, MODE_POINT);
+//      //int    vdigits = (int)MarketInfo(_symbol, MODE_DIGITS);
+//      //sl = NormalizeDouble(_price-_SL*dir_flag*vpoint, vdigits);
+//      //tp = NormalizeDouble(_price+_TP*dir_flag*vpoint, vdigits);
+//   }
+//   
+//   if(_symbol == "NULL") _symbol = Symbol();
+//   //ticket = OrderSend(_symbol, _type, _lots, _price, MaximumSlippage, sl, tp, _comment, _magic);
+//   //if(ticket < 0) {
+//   //   // Failure
+//   //   error = GetLastError();
+//   //   zmq_ret = zmq_ret + ", " + "'_response': '" + IntegerToString(error) + "', 'response_value': '" + ErrorDescription(error) + "'";
+//   //   return(-1*error);
+//   //}
+//
+//   //int tmpRet = OrderSelect(ticket, SELECT_BY_TICKET, MODE_TRADES);
+//   
+//   //zmq_ret = zmq_ret + ", '_symbol': '" + _symbol + "', '_magic': " + IntegerToString(_magic) + ", '_ticket': " + IntegerToString(OrderTicket()) + ", '_open_time': '" + TimeToStr(OrderOpenTime(),TIME_DATE|TIME_SECONDS) + "', '_open_price': " + DoubleToString(OrderOpenPrice());
+//
+//   if(DMA_MODE) {
+//   
+//      int retries = 3;
+//      while(true) {
+//         retries--;
+//         if(retries < 0) return(0);
+//         
+//         //if((_SL == 0 && _TP == 0) || (OrderStopLoss() == _SL && OrderTakeProfit() == _TP)) {
+//         //   return(ticket);
+//         //}
+//
+//         if(DWX_IsTradeAllowed(30, zmq_ret) == 1) {
+//            if(DWX_ModifyOrder(ticket, _price, _SL, _TP, retries, zmq_ret)) {
+//               return(ticket);
+//            }
+//            if(retries == 0) {
+//               zmq_ret = zmq_ret + ", '_response': 'ERROR_SETTING_SL_TP'";
+//               return(-11111);
+//            }
+//         }
+//
+//         Sleep(MILLISECOND_TIMER);
+//      }
+//
+//      zmq_ret = zmq_ret + ", '_response': 'ERROR_SETTING_SL_TP'";
+//      zmq_ret = zmq_ret + "}";
+//      return(-1);
+//   }
+//
+//    // Send zmq_ret to Python Client
+//    zmq_ret = zmq_ret + "}";
+//    
+//   return(ticket);
+//}
+
+//+------------------------------------------------------------------+
+// SET SL/TP
+bool DWX_ModifyOrder(int ticket, double _price, double _SL, double _TP, int retries, string &zmq_ret) {
+   
+//   if (OrderSelect(ticket, SELECT_BY_TICKET) == true){
+//      
+//      if (OrderType() == OP_BUY || OrderType() == OP_SELL || _price == 0.0) 
+//         _price = OrderOpenPrice();
+//      
+//      int dir_flag = -1;
+//      
+//      if (OrderType() == OP_BUY || OrderType() == OP_BUYLIMIT || OrderType() == OP_BUYSTOP)
+//         dir_flag = 1;
+//    
+//      double vpoint  = MarketInfo(OrderSymbol(), MODE_POINT);
+//      int    vdigits = (int)MarketInfo(OrderSymbol(), MODE_DIGITS);
+//      double mSL = NormalizeDouble(_price-_SL*dir_flag*vpoint, vdigits);
+//      double mTP = NormalizeDouble(_price+_TP*dir_flag*vpoint, vdigits);
+//      
+//      if(OrderModify(ticket, _price, mSL, mTP, 0, 0)) {
+//         zmq_ret = zmq_ret + ", '_sl': " + DoubleToString(mSL) + ", '_tp': " + DoubleToString(mTP);
+//         return(true);
+//      } else {
+//         int error = GetLastError();
+//         zmq_ret = zmq_ret + ", '_response': '" + IntegerToString(error) + "', '_response_value': '" + ErrorDescription(error) + "', '_sl_attempted': " + DoubleToString(mSL, vdigits) + ", '_tp_attempted': " + DoubleToString(mTP, vdigits);
+//   
+//         if(retries == 0) {
+//            RefreshRates();
+//            DWX_CloseAtMarket(-1, zmq_ret);
+//         }
+//         
+//         return(false);
+//      }
+//   } else {
+//      zmq_ret = zmq_ret + ", '_response': 'NOT_FOUND'";
+//   }
+   
+   return(false);
+}
+
+//+------------------------------------------------------------------+
+// CLOSE AT MARKET
+bool DWX_CloseAtMarket(double size, string &zmq_ret) {
+
+   int error;
+
+   int retries = 3;
+   while(true) {
+      retries--;
+      if(retries < 0) return(false);
+
+      if(DWX_IsTradeAllowed(30, zmq_ret) == 1) {
+         if(DWX_ClosePartial(size, zmq_ret)) {
+            // trade successfuly closed
+            return(true);
+         } else {
+            error = GetLastError();
+            zmq_ret = zmq_ret + ", '_response': '" + IntegerToString(error) + "', '_response_value': '" + ErrorDescription(error) + "'";
+         }
+      }
+
+   }
+   return(false);
+}
+
+//+------------------------------------------------------------------+
+// CLOSE PARTIAL SIZE
+bool DWX_ClosePartial(double size, string &zmq_ret, int ticket=0, bool externCall=false) {
+
+   //if(OrderType() != OP_BUY && OrderType() != OP_SELL) {
+   //   return(true);
+   //}
+
+//   int error;
+//   bool close_ret = False;
+//   
+   // If the function is called directly, setup init() JSON here and get OrderSelect.
+   if(ticket != 0 || externCall) {
+      zmq_ret = zmq_ret + "'_action': 'CLOSE', '_ticket': " + IntegerToString(ticket);
+      
+      //if (OrderSelect(ticket, SELECT_BY_TICKET)) {
+      //   zmq_ret = zmq_ret + ", '_response': 'CLOSE_PARTIAL'";
+      //} else {
+      //   zmq_ret = zmq_ret + ", '_response': 'CLOSE_PARTIAL_FAILED'";
+      //   return(false);
+      //}
+   }
+//   
+//   RefreshRates();
+//   double priceCP = OrderClosePrice();
+   
+   //if(size < 0.01 || size > OrderLots()) {
+   //   size = OrderLots();
+   //}
+   //close_ret = OrderClose(OrderTicket(), size, priceCP, MaximumSlippage);
+   
+//   if (close_ret == true) {
+//      zmq_ret = zmq_ret + ", '_close_price': " + DoubleToString(priceCP) + ", '_close_lots': " + DoubleToString(size);
+//   } else {
+//      error = GetLastError();
+//      zmq_ret = zmq_ret + ", '_response': '" + IntegerToString(error) + "', '_response_value': '" + ErrorDescription(error) + "'";
+//   }
+//      
+   //return(close_ret);
+   return true;
+}
+
+//+------------------------------------------------------------------+
+// CLOSE ORDER (by Magic Number)
+void DWX_CloseOrder_Magic(int _magic, string &zmq_ret) {
+
+   bool found = false;
+
+   zmq_ret = zmq_ret + "'_action': 'CLOSE_ALL_MAGIC'";
+   zmq_ret = zmq_ret + ", '_magic': " + IntegerToString(_magic);
+   
+   zmq_ret = zmq_ret + ", '_responses': {";
+   
+//   for(int i=OrdersTotal()-1; i >= 0; i--) {
+//      if (OrderSelect(i,SELECT_BY_POS)==true && OrderMagicNumber() == _magic) {
+//         found = true;
+//         
+//         zmq_ret = zmq_ret + IntegerToString(OrderTicket()) + ": {'_symbol':'" + OrderSymbol() + "'";
+//         
+//         if(OrderType() == OP_BUY || OrderType() == OP_SELL) {
+//            DWX_CloseAtMarket(-1, zmq_ret);
+//            zmq_ret = zmq_ret + ", '_response': 'CLOSE_MARKET'";
+//            
+//            if (i != 0)
+//               zmq_ret = zmq_ret + "}, ";
+//            else
+//               zmq_ret = zmq_ret + "}";
+//               
+//         } else {
+//            zmq_ret = zmq_ret + ", '_response': 'CLOSE_PENDING'";
+//            
+//            if (i != 0)
+//               zmq_ret = zmq_ret + "}, ";
+//            else
+//               zmq_ret = zmq_ret + "}";
+//               
+//            int tmpRet = OrderDelete(OrderTicket());
+//         }
+//      }
+//   }
+
+   zmq_ret = zmq_ret + "}";
+   
+   if(found == false) {
+      zmq_ret = zmq_ret + ", '_response': 'NOT_FOUND'";
+   }
+   else {
+      zmq_ret = zmq_ret + ", '_response_value': 'SUCCESS'";
+   }
+}
+
+//+------------------------------------------------------------------+
+// CLOSE ORDER (by Ticket)
+void DWX_CloseOrder_Ticket(int _ticket, string &zmq_ret) {
+
+   bool found = false;
+
+   zmq_ret = zmq_ret + "'_action': 'CLOSE', '_ticket': " + IntegerToString(_ticket);
+
+//   for(int i=0; i<OrdersTotal(); i++) {
+//      if (OrderSelect(i,SELECT_BY_POS)==true && OrderTicket() == _ticket) {
+//         found = true;
+//
+//         if(OrderType() == OP_BUY || OrderType() == OP_SELL) {
+//            DWX_CloseAtMarket(-1, zmq_ret);
+//            zmq_ret = zmq_ret + ", '_response': 'CLOSE_MARKET'";
+//         } else {
+//            zmq_ret = zmq_ret + ", '_response': 'CLOSE_PENDING'";
+//            int tmpRet = OrderDelete(OrderTicket());
+//         }
+//      }
+//   }
+
+   if(found == false) {
+      zmq_ret = zmq_ret + ", '_response': 'NOT_FOUND'";
+   }
+   else {
+      zmq_ret = zmq_ret + ", '_response_value': 'SUCCESS'";
+   }
+}
+
+//+------------------------------------------------------------------+
+// CLOSE ALL ORDERS
+void DWX_CloseAllOrders(string &zmq_ret) {
+
+   bool found = false;
+
+   zmq_ret = zmq_ret + "'_action': 'CLOSE_ALL'";
+   
+   zmq_ret = zmq_ret + ", '_responses': {";
+   
+//   for(int i=OrdersTotal()-1; i >= 0; i--) {
+//      if (OrderSelect(i,SELECT_BY_POS)==true) {
+//      
+//         found = true;
+//         
+//         zmq_ret = zmq_ret + IntegerToString(OrderTicket()) + ": {'_symbol':'" + OrderSymbol() + "', '_magic': " + IntegerToString(OrderMagicNumber());
+//         
+//         if(OrderType() == OP_BUY || OrderType() == OP_SELL) {
+//            DWX_CloseAtMarket(-1, zmq_ret);
+//            zmq_ret = zmq_ret + ", '_response': 'CLOSE_MARKET'";
+//            
+//            if (i != 0)
+//               zmq_ret = zmq_ret + "}, ";
+//            else
+//               zmq_ret = zmq_ret + "}";
+//               
+//         } else {
+//            zmq_ret = zmq_ret + ", '_response': 'CLOSE_PENDING'";
+//            
+//            if (i != 0)
+//               zmq_ret = zmq_ret + "}, ";
+//            else
+//               zmq_ret = zmq_ret + "}";
+//               
+//            int tmpRet = OrderDelete(OrderTicket());
+//         }
+//      }
+//   }
+
+   zmq_ret = zmq_ret + "}";
+   
+   if(found == false) {
+      zmq_ret = zmq_ret + ", '_response': 'NOT_FOUND'";
+   }
+   else {
+      zmq_ret = zmq_ret + ", '_response_value': 'SUCCESS'";
+   }
+}
+
+//+------------------------------------------------------------------+
+// GET OPEN ORDERS
+void DWX_GetOpenOrders(string &zmq_ret) {
+
+//   bool found = false;
+//
+//   zmq_ret = zmq_ret + "'_action': 'OPEN_TRADES'";
+//   zmq_ret = zmq_ret + ", '_trades': {";
+//   
+//   for(int i=OrdersTotal()-1; i>=0; i--) {
+//      found = true;
+//      
+//      if (OrderSelect(i,SELECT_BY_POS)==true) {
+//      
+//         //zmq_ret = zmq_ret + IntegerToString(OrderTicket()) + ": {";
+//         
+////         zmq_ret = zmq_ret + "'_magic': " + IntegerToString(OrderMagicNumber()) + ", '_symbol': '" + OrderSymbol() + "', '_lots': " + DoubleToString(OrderLots()) + ", '_type': " + IntegerToString(OrderType()) + ", '_open_price': " + DoubleToString(OrderOpenPrice()) + ", '_open_time': '" + TimeToStr(OrderOpenTime(),TIME_DATE|TIME_SECONDS) + "', '_SL': " + DoubleToString(OrderStopLoss()) + ", '_TP': " + DoubleToString(OrderTakeProfit()) + ", '_pnl': " + DoubleToString(OrderProfit()) + ", '_comment': '" + OrderComment() + "'";
+//         
+//         if (i != 0)
+//            zmq_ret = zmq_ret + "}, ";
+//         else
+//            zmq_ret = zmq_ret + "}";
+//      }
+//   }
+//   zmq_ret = zmq_ret + "}";
+
+}
+
+//+------------------------------------------------------------------+
+// counts the number of orders with a given magic number. currently not used. 
+int DWX_numOpenOrdersWithMagic(int _magic) {
+   int n = 0;
+   //for(int i=OrdersTotal()-1; i >= 0; i--) {
+   //   if (OrderSelect(i,SELECT_BY_POS)==true && OrderMagicNumber() == _magic) {
+   //      n++;
+   //   }
+   //}
+   return n;
+}
+
+//+------------------------------------------------------------------+
+// CHECK IF TRADE IS ALLOWED
+int DWX_IsTradeAllowed(int MaxWaiting_sec, string &zmq_ret) {
+    
+    if(!MQL5_TRADE_ALLOWED) {
+    
+        int StartWaitingTime = (int)GetTickCount();
+        zmq_ret = zmq_ret + ", " + "'_response': 'TRADE_CONTEXT_BUSY'";
+        
+        while(true) {
+            
+            if(IsStopped()) {
+                zmq_ret = zmq_ret + ", " + "'_response_value': 'EA_STOPPED_BY_USER'";
+                return(-1);
+            }
+            
+            int diff = (int)(GetTickCount() - StartWaitingTime);
+            if(diff > MaxWaiting_sec * 1000) {
+                zmq_ret = zmq_ret + ", '_response': 'WAIT_LIMIT_EXCEEDED', '_response_value': " + IntegerToString(MaxWaiting_sec);
+                return(-2);
+            }
+            // if the trade context has become free,
+            if(MQL5_TRADE_ALLOWED) {
+                zmq_ret = zmq_ret + ", '_response': 'TRADE_CONTEXT_NOW_FREE'";
+                //RefreshRates();
+                return(1);
+            }
+            
+          }
+    } else {
+        return(1);
+    }
+    return(1);
+}
+
+//bool CheckServerStatus() {
+//
+//   // Is _StopFlag == True, inform the client application
+//   if (IsStopped()) {
+//      InformPullClient(pullSocket, "{'_response': 'EA_IS_STOPPED'}");
+//      return(false);
+//   }
+//   
+//   // Default
+//   return(true);
+//}
+
+string ErrorDescription(int error_code) {
+   string error_string;
+//----
+   switch(error_code)
+     {
+      //---- codes returned from trade server
+      case 0:
+      case 1:   error_string="no error";                                                  break;
+      case 2:   error_string="common error";                                              break;
+      case 3:   error_string="invalid trade parameters";                                  break;
+      case 4:   error_string="trade server is busy";                                      break;
+      case 5:   error_string="old version of the client terminal";                        break;
+      case 6:   error_string="no connection with trade server";                           break;
+      case 7:   error_string="not enough rights";                                         break;
+      case 8:   error_string="too frequent requests";                                     break;
+      case 9:   error_string="malfunctional trade operation (never returned error)";      break;
+      case 64:  error_string="account disabled";                                          break;
+      case 65:  error_string="invalid account";                                           break;
+      case 128: error_string="trade timeout";                                             break;
+      case 129: error_string="invalid price";                                             break;
+      case 130: error_string="invalid stops";                                             break;
+      case 131: error_string="invalid trade volume";                                      break;
+      case 132: error_string="market is closed";                                          break;
+      case 133: error_string="trade is disabled";                                         break;
+      case 134: error_string="not enough money";                                          break;
+      case 135: error_string="price changed";                                             break;
+      case 136: error_string="off quotes";                                                break;
+      case 137: error_string="broker is busy (never returned error)";                     break;
+      case 138: error_string="requote";                                                   break;
+      case 139: error_string="order is locked";                                           break;
+      case 140: error_string="long positions only allowed";                               break;
+      case 141: error_string="too many requests";                                         break;
+      case 145: error_string="modification denied because order too close to market";     break;
+      case 146: error_string="trade context is busy";                                     break;
+      case 147: error_string="expirations are denied by broker";                          break;
+      case 148: error_string="amount of open and pending orders has reached the limit";   break;
+      case 149: error_string="hedging is prohibited";                                     break;
+      case 150: error_string="prohibited by FIFO rules";                                  break;
+      //---- mql4 errors
+      case 4000: error_string="no error (never generated code)";                          break;
+      case 4001: error_string="wrong function pointer";                                   break;
+      case 4002: error_string="array index is out of range";                              break;
+      case 4003: error_string="no memory for function call stack";                        break;
+      case 4004: error_string="recursive stack overflow";                                 break;
+      case 4005: error_string="not enough stack for parameter";                           break;
+      case 4006: error_string="no memory for parameter string";                           break;
+      case 4007: error_string="no memory for temp string";                                break;
+      case 4008: error_string="not initialized string";                                   break;
+      case 4009: error_string="not initialized string in array";                          break;
+      case 4010: error_string="no memory for array\' string";                             break;
+      case 4011: error_string="too long string";                                          break;
+      case 4012: error_string="remainder from zero divide";                               break;
+      case 4013: error_string="zero divide";                                              break;
+      case 4014: error_string="unknown command";                                          break;
+      case 4015: error_string="wrong jump (never generated error)";                       break;
+      case 4016: error_string="not initialized array";                                    break;
+      case 4017: error_string="dll calls are not allowed";                                break;
+      case 4018: error_string="cannot load library";                                      break;
+      case 4019: error_string="cannot call function";                                     break;
+      case 4020: error_string="expert function calls are not allowed";                    break;
+      case 4021: error_string="not enough memory for temp string returned from function"; break;
+      case 4022: error_string="system is busy (never generated error)";                   break;
+      case 4050: error_string="invalid function parameters count";                        break;
+      case 4051: error_string="invalid function parameter value";                         break;
+      case 4052: error_string="string function internal error";                           break;
+      case 4053: error_string="some array error";                                         break;
+      case 4054: error_string="incorrect series array using";                             break;
+      case 4055: error_string="custom indicator error";                                   break;
+      case 4056: error_string="arrays are incompatible";                                  break;
+      case 4057: error_string="global variables processing error";                        break;
+      case 4058: error_string="global variable not found";                                break;
+      case 4059: error_string="function is not allowed in testing mode";                  break;
+      case 4060: error_string="function is not confirmed";                                break;
+      case 4061: error_string="send mail error";                                          break;
+      case 4062: error_string="string parameter expected";                                break;
+      case 4063: error_string="integer parameter expected";                               break;
+      case 4064: error_string="double parameter expected";                                break;
+      case 4065: error_string="array as parameter expected";                              break;
+      case 4066: error_string="requested history data in update state";                   break;
+      case 4099: error_string="end of file";                                              break;
+      case 4100: error_string="some file error";                                          break;
+      case 4101: error_string="wrong file name";                                          break;
+      case 4102: error_string="too many opened files";                                    break;
+      case 4103: error_string="cannot open file";                                         break;
+      case 4104: error_string="incompatible access to a file";                            break;
+      case 4105: error_string="no order selected";                                        break;
+      case 4106: error_string="unknown symbol";                                           break;
+      case 4107: error_string="invalid price parameter for trade function";               break;
+      case 4108: error_string="invalid ticket";                                           break;
+      case 4109: error_string="trade is not allowed in the expert properties";            break;
+      case 4110: error_string="longs are not allowed in the expert properties";           break;
+      case 4111: error_string="shorts are not allowed in the expert properties";          break;
+      case 4200: error_string="object is already exist";                                  break;
+      case 4201: error_string="unknown object property";                                  break;
+      case 4202: error_string="object is not exist";                                      break;
+      case 4203: error_string="unknown object type";                                      break;
+      case 4204: error_string="no object name";                                           break;
+      case 4205: error_string="object coordinates error";                                 break;
+      case 4206: error_string="no specified subwindow";                                   break;
+      default:   error_string="unknown error";
+      }
+   return(error_string);
+}
+  
+//+------------------------------------------------------------------+
+
+double DWX_GetAsk(string symbol) {
+   //if(symbol == "NULL") {
+   //   return(Ask);
+   //} else {
+   //   return(MarketInfo(symbol,MODE_ASK));
+   //}
+   return 0.0;
+}
+
+//+------------------------------------------------------------------+
+
+double DWX_GetBid(string symbol) {
+   if(symbol == "NULL") {
+      //return(Bid);
+      return 0.0;
+   } else {
+      //return(MarketInfo(symbol,MODE_BID));
+      return 0.0;
+   }
+}
+//+------------------------------------------------------------------+
+
+void printArray(string &arr[]) {
+   if (ArraySize(arr) == 0) Print("{}");
+   string printStr = "{";
+   int i;
+   for (i=0; i<ArraySize(arr); i++) {
+      if (i == ArraySize(arr)-1) printStr += arr[i];
+      else printStr += arr[i] + ", ";
+   }
+   Print(printStr + "}");
+}
+
+//+------------------------------------------------------------------+

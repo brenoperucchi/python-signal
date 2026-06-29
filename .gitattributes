@@ -1,0 +1,9 @@
+# Keep GitHub language stats focused on the maintained client code.
+MQL/Imentore/Old/** linguist-vendored
+Python/DwX-Others/** linguist-vendored
+
+# Binary/runtime dependencies and compiled EAs.
+*.ex4 binary linguist-vendored
+*.ex5 binary linguist-vendored
+*.so binary linguist-vendored
+*.dylib binary linguist-vendored

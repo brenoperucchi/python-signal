@@ -1,0 +1,445 @@
+//+------------------------------------------------------------------+
+//|                                                      BB-EMA.mq5  |
+//|                        Copyright 2023, MetaQuotes Software Corp. |
+//|                                           Breno Cardoso Perucchi |
+//+------------------------------------------------------------------+
+#property copyright   "Copyright Breno Perucchi"
+#property description "BB EMA"
+#property link        "https://www.imentore.com"
+#property version     "1.18"
+#property strict
+
+// Include the CTrade library
+#include <Trade\Trade.mqh>
+CTrade trade;  // Instance of CTrade
+
+input string ExpertSetting = "---Expert Settings---";
+input int    iVolume              = 10;                      // Volume Order
+input int    iStopLoss            = 850;                     // Stop Loss
+input int    InpBandsPeriod       = 30;                      // Bollinger Bands Period
+input double InpBandsDeviation    = 2.4;                     // Bollinger Bands Deviation
+input int    iReachBarTimes       = 2;                       // Check bar times
+
+input string DailySetting = "---Daily Settings---";
+input double iDailyProfit         = 4;                       // Daily Profit amount
+input bool   iDailyProfitAllow    = true;                    // Daily Profit Enable
+
+input string TrallingSettings = "---Tralling Settings---";
+input bool   iTrallingStopEnable  = true;                    // Tralling Stop Enable After time market
+input int    iTrallingStopAmount  = 10;                      // Tralling Stop Amount
+
+input string OtherSettings = "---Others Settings---";
+input bool   iOppositePosition    = true;                    // Opposite Position Enable After Stop Loss
+
+input string ConsectutiveStopLoss= "---Others Settings---";
+input bool   iConsecutiveStopLossCountEnable = true; // Contador para StopLoss consecutivos
+input int    iConsecutiveStopLossMax         = 2; // Contador para StopLoss consecutivos
+
+int          handleStd, handleEma;
+bool         reachBar[];
+ulong        ticketID;
+double       upperBand[];
+double       lowerBand[];
+datetime     lastBarTime;
+datetime     iOpenTime;
+
+
+int      previousDay              = -1;  // Previous day
+int      rates_total              = 3;
+int      consecutiveStopLossCount = 0; // Contador para StopLoss consecutivos
+bool     lastPositionHitStopLoss  = false; // manter o registro se a última posição atingiu stop loss
+bool     firstRun                 = true;  // Variable to check if it's the first run
+bool     isPositionOpen           = false;
+bool     upCrossedCandle          = false;
+bool     lowCrossedCandle         = false;
+double   buyPrice                 = 0.0;  // Price of the last buy trade
+double   profit_day               = 0; // Profit Day
+double   profit_total             = 0; // Profit Day
+datetime lastOrderDay             = D'1970.01.01'; // Data do último dia que uma ordem foi realizada
+
+
+
+ENUM_POSITION_TYPE currentPositionType;
+
+//+------------------------------------------------------------------+
+//|                                                                  |
+//+------------------------------------------------------------------+
+int OnInit()
+{
+//ArraySetAsSeries(middleBand, true);
+    ArraySetAsSeries(upperBand, true);
+    ArraySetAsSeries(lowerBand, true);
+//ArraySetAsSeries(stdBuffer, true);
+    ArrayResize(upperBand, rates_total);
+    ArrayResize(lowerBand, rates_total);
+    //ArrayResize(reachBar, iReachBarTimes);
+
+
+
+    handleEma = iMA(Symbol(), PERIOD_CURRENT, InpBandsPeriod, 0, MODE_EMA, PRICE_CLOSE);
+    handleStd = iStdDev(Symbol(), PERIOD_CURRENT, InpBandsPeriod, 0, MODE_EMA, PRICE_CLOSE);
+    return(INIT_SUCCEEDED);
+}
+
+//+------------------------------------------------------------------+
+//|                                                                  |
+//+------------------------------------------------------------------+
+void OnTick()
+{
+    MqlTradeResult result;
+    
+    MqlDateTime mqlTime;
+    TimeCurrent(mqlTime);
+    int currentHour = mqlTime.hour;
+    int currentMinute = mqlTime.min;
+    int currentDay = mqlTime.day;
+    string commment_open, comment_order_stat, comment_bb_bands, comment_stop_loss;
+
+    MqlTick lastTick;
+    SymbolInfoTick(Symbol(), lastTick);
+
+    MqlRates rates[];
+    
+    PositionSelectByTicket(ticketID);
+
+    if(CopyRates(_Symbol, PERIOD_CURRENT, 0, rates_total, rates) > 0)
+    {
+        double lastBidOfPenultimateCandle = rates[1].close;
+        // Agora você pode usar lastBidOfPenultimateCandle
+    }
+
+    double middleBand[], stdBuffer[];
+
+    CopyBuffer(handleEma, 0, 0, rates_total, middleBand);
+    CopyBuffer(handleStd, 0, 0, rates_total, stdBuffer);
+
+    for(int i = 0; i < rates_total; i++) {
+       upperBand[i] = middleBand[i] + InpBandsDeviation * stdBuffer[i];
+       lowerBand[i] = middleBand[i] - InpBandsDeviation * stdBuffer[i];
+    }
+    
+//if(lastTick.bid >= upperBand[0])
+//  Comment("Here");
+//if(lastTick.ask <= lowerBand[0])
+//  Comment("Here");
+
+// New tick
+    datetime currentBarTime = iTime(_Symbol, _Period, 0);
+  
+    if(currentBarTime != lastBarTime)
+    {
+        // New bar has formed
+        // Place your code for new bar here
+
+        // Remember the current bar time
+        upCrossedCandle = false;
+        lowCrossedCandle = false;
+        
+
+        lastBarTime = currentBarTime;
+    }
+
+    if (currentDay != previousDay)
+    {
+         profit_day = 0.0;
+         previousDay = currentDay;
+         consecutiveStopLossCount = 0;
+    }
+
+
+
+// Comment
+    string order_type = currentPositionType == POSITION_TYPE_BUY ? "BUY" : " SELL";
+    
+    comment_bb_bands = "Price Bid: " + DoubleToString(lastTick.bid, 2) + " Price Ask: " + DoubleToString(lastTick.ask, 2) + "\n" +
+            // "\nRates[0] =>" + DoubleToString(rates[0].high , 0) + " - Upper Band: " + DoubleToString(upperBand[0], 2) +
+            // "\nRates[1] =>" + DoubleToString(rates[1].high) + " - Lower Band: " + DoubleToString(lowerBand[0], 2) + "\n" +
+            "\nCross Above: " + ToUpper(string(!isPositionOpen && (rates[1].high >= upperBand[1] && rates[2].high >= upperBand[2]))) +
+            "\nCross Below: " + ToUpper(string(!isPositionOpen && (rates[1].low <= lowerBand[1] && rates[2].low <= lowerBand[2]))) + "\n"
+           ;
+
+    if(isPositionOpen)               
+        commment_open = "\nOrder Ticket: "+ IntegerToString(ticketID) + "\nOrder Type "+ order_type + "\nOrder Profit $: "+ DoubleToString(PositionGetDouble(POSITION_PROFIT), 2) +"\n";        
+    else
+        commment_open = "";
+
+    
+    comment_order_stat = "\n\nProfit Total: "+ DoubleToString(profit_total, 2) + "\nProfit Day: " + DoubleToString(profit_day, 2) + "\n";
+
+    comment_stop_loss = "\nStop Loss Count: " + IntegerToString(consecutiveStopLossCount) + "\nLast Position Hit Stop Loss: " + ToUpper(string(lastPositionHitStopLoss)) + "\n";
+     
+    string comment_step_1 = comment_bb_bands + commment_open + comment_stop_loss + comment_order_stat;       
+    Comment(comment_step_1);
+// Comment
+
+ // Stop Loss Reach the prie order
+    if(isPositionOpen && FindCloseOrderByTicketId(ticketID) > 0)
+    {      
+        //lastPositionHitStopLoss = true;
+        long deal_ticket = FindCloseOrderByTicketId(ticketID, iOpenTime);
+        
+        double profit = HistoryDealGetDouble(deal_ticket, DEAL_PROFIT);       
+        if(deal_ticket > 0){
+            profit_day   += profit;
+            profit_total += profit;
+            
+            consecutiveStopLossCount++;
+            isPositionOpen  = false;  // Set the position as closed
+            iOpenTime       = NULL;
+            
+            if(consecutiveStopLossCount == iConsecutiveStopLossMax && lastPositionHitStopLoss)
+              lastPositionHitStopLoss = false;
+            else
+             lastPositionHitStopLoss = true;
+         }
+
+
+    }
+
+
+// Checking if price of SELL Order crosses the upper band
+    if (isPositionOpen && currentPositionType != POSITION_TYPE_SELL && (rates[1].high >= upperBand[1] || rates[2].high >= upperBand[2]))
+    {    
+        MakeOrderClose(POSITION_TYPE_BUY);        
+
+    }
+
+// Checking if price of BUY Order crosses the upper band
+    if (isPositionOpen && currentPositionType != POSITION_TYPE_BUY && (rates[1].low <= lowerBand[1] || rates[2].low <= lowerBand[2]))
+    {
+        MakeOrderClose(POSITION_TYPE_SELL);        
+    }
+
+// Trailing Stop between 16:02 and 17:30
+    if(iTrallingStopEnable && (currentHour > 16 || (currentHour == 16 && currentMinute > 2)) && currentHour <= 17 && isPositionOpen)
+    {
+        PositionSelectByTicket(ticketID);  // Select the current open position
+        double profit = PositionGetDouble(POSITION_PROFIT);
+        double openPrice = PositionGetDouble(POSITION_PRICE_OPEN);
+        double stopLossPrice = PositionGetDouble(POSITION_SL);
+        double currentPrice = (currentPositionType == POSITION_TYPE_BUY) ? lastTick.ask : lastTick.bid;
+
+        // Check if profit is greater than 0 and if price has moved more than 200 points in favor
+        if (profit > 0 && MathAbs(currentPrice - openPrice) > iTrallingStopAmount * _Point)
+        {
+            // Set new Stop Loss level at 200 points from current price
+            if (currentPositionType == POSITION_TYPE_BUY)
+            {
+                stopLossPrice = currentPrice - iTrallingStopAmount * _Point;
+                // Make sure the new stop loss level is higher than the previous level
+                if (stopLossPrice > PositionGetDouble(POSITION_SL))
+                {
+                    trade.PositionModify(ticketID, stopLossPrice, PositionGetDouble(POSITION_TP));
+                }
+            }
+            else // POSITION_TYPE_SELL
+            {
+                stopLossPrice = currentPrice + iTrallingStopAmount * _Point;
+                // Make sure the new stop loss level is lower than the previous level
+                if (stopLossPrice < PositionGetDouble(POSITION_SL))
+                {
+                    trade.PositionModify(ticketID, stopLossPrice, PositionGetDouble(POSITION_TP));
+                }
+            }
+        }
+    }
+
+// Consecutive StopLoss Profit Restrict
+    if(iConsecutiveStopLossCountEnable && consecutiveStopLossCount >= iConsecutiveStopLossMax){
+      string comment_stop_loss_count = "\nYour are reach your Consecutive Stop Loss Max :" + IntegerToString(consecutiveStopLossCount);
+      Comment(comment_step_1 + comment_stop_loss_count);
+      return;
+    }
+
+// Daily Profit Restrict
+    if (profit_day >= iDailyProfit && iDailyProfitAllow)
+    {
+      string comment_profit_day = "\nYour are reach your Daily Profit " + DoubleToString(iDailyProfit, 2) + " > " + DoubleToString(profit_day, 2);
+      Comment(comment_step_1 + comment_profit_day);
+      return;  // Exit the function
+    }
+
+// Restrict of Date Times to execute orders
+    if(!isPositionOpen)
+    {
+        if(currentHour < 9 || (currentHour == 9 && currentMinute <= 2) || currentHour > 16 || (currentHour == 16 && currentMinute > 1))
+            return;
+    }
+
+    bool crossAbove = !isPositionOpen && (rates[0].high >= upperBand[0]);
+    bool crossBelow = !isPositionOpen && (rates[0].low <= lowerBand[0]);
+    // bool crossAbove = !isPositionOpen && (rates[1].high >= upperBand[1] && rates[2].high >= upperBand[2])
+    // bool crossBelow = !isPositionOpen && (rates[1].low <= lowerBand[1] && rates[2].low <= lowerBand[2])
+
+    // New Order - Checking if the price hits the Upper band
+    
+    // Only set reachBar[ArraySize(reachBar) - 1] = true if crossBelow condition is met and the candle hasn't been crossed before.
+
+    // Later in your code...
+    handleCross(crossBelow, upCrossedCandle, POSITION_TYPE_BUY);
+    handleCross(crossAbove, lowCrossedCandle, POSITION_TYPE_SELL);
+
+}
+
+//+------------------------------------------------------------------+
+//|                                                |
+//+------------------------------------------------------------------+
+void handleCross(bool crossCondition, bool &crossedCandle, ENUM_POSITION_TYPE orderType) {
+    if (crossCondition && !crossedCandle) {
+        int reachBarSize = ArraySize(reachBar);
+        
+        ArrayResize(reachBar, reachBarSize + 1);
+        reachBar[reachBarSize] = true;
+        
+        crossedCandle = true;  // We mark that this candle has been crossed.
+
+        if(checkReachBarTimes())
+            if(MakeOrderOpen(orderType)){
+                ArrayInitialize(reachBar, false);
+                ArrayResize(reachBar, 0);    
+            }
+    }
+}
+
+//+------------------------------------------------------------------+
+//|                                                |
+//+------------------------------------------------------------------+
+bool checkReachBarTimes(){
+    int count = 0;
+    for(int i = 0; i < ArraySize(reachBar); i++){
+        if(reachBar[i] == true)
+            count++;
+    }
+    return count >= iReachBarTimes;
+}
+
+//+------------------------------------------------------------------+
+//| Make an Close order                                              |
+//+------------------------------------------------------------------+
+void MakeOrderClose(ENUM_POSITION_TYPE PositionType){
+    MqlTradeResult result;
+    double pPrice1 = 0;
+    double pPrice2 = 0;     
+
+    if(trade.PositionClose(_Symbol)){
+        trade.Result(result);
+        
+        long deal_ticket = FindCloseOrderByTicketId(ticketID, iOpenTime);
+        double profit = HistoryDealGetDouble(deal_ticket, DEAL_PROFIT);       
+        double positionStopLoss = HistoryDealGetDouble(deal_ticket, DEAL_SL);
+        
+        if(deal_ticket > 0){
+            profit_day   += profit;
+            profit_total += profit;
+        }
+      
+        iOpenTime = NULL;
+        isPositionOpen = false;
+
+        if(PositionType == POSITION_TYPE_BUY){
+            pPrice1 = positionStopLoss;
+            pPrice2 = result.price;
+        } else if(PositionType == POSITION_TYPE_SELL) {
+            pPrice1 = result.price;
+            pPrice2 = positionStopLoss;
+
+        }
+        
+        if (pPrice1 >= pPrice2){          
+            lastPositionHitStopLoss = true;
+            consecutiveStopLossCount++;
+        }
+        else
+            consecutiveStopLossCount = 0;
+    }    
+}
+
+
+//+------------------------------------------------------------------+
+//| Make a New Open order                                            |
+//+------------------------------------------------------------------+
+bool MakeOrderOpen(ENUM_POSITION_TYPE PositionType){
+    MqlTradeResult result;
+    
+    bool changes = false;
+    double SL   = 0;
+    
+    if(firstRun == false && iOppositePosition == true)
+        if((lastPositionHitStopLoss == true && currentPositionType == PositionType))
+            return changes;
+    
+    if(PositionType == POSITION_TYPE_BUY){
+        int order = trade.Buy(iVolume, _Symbol, 0, 0, 0, "BB_EMA");
+        SL = result.price - iStopLoss * _Point;    
+    }
+    else{
+        int order = trade.Sell(iVolume, _Symbol, 0, 0, 0, "BB_EMA");
+        SL = result.price + iStopLoss * _Point;    
+    }
+
+    trade.Result(result);
+    
+    if(result.retcode == TRADE_RETCODE_DONE || result.retcode == TRADE_RETCODE_PLACED){
+      changes = true;
+      ticketID = trade.ResultOrder();        
+    
+      isPositionOpen = true;
+      currentPositionType = PositionType;
+      
+      bool modify = false;
+
+      for( int i = 1; modify == false; i++ ){
+        modify = trade.PositionModify(ticketID, SL, 0);
+        if(PositionType == POSITION_TYPE_BUY)
+            SL = result.price - (iStopLoss + i) * _Point;
+         else
+            SL = result.price + (iStopLoss + i) * _Point;                         
+       }
+        
+      PositionSelectByTicket(ticketID);
+      iOpenTime = datetime(PositionGetInteger(POSITION_TIME));
+    }
+         
+    //lastPositionHitStopLoss = false;
+    firstRun = false;
+    return changes;
+}
+
+//+------------------------------------------------------------------+
+//| FindCloseOrderByTicketId                                         |
+//+------------------------------------------------------------------+
+long FindCloseOrderByTicketId(const ulong ticketid, datetime ticketOpenTime=0)
+{
+    HistorySelect(ticketOpenTime, TimeCurrent());
+
+    for(int i = HistoryDealsTotal() - 1; i >= 0; i--)
+    {
+        ulong deal_ticket = HistoryDealGetTicket(i);
+        ENUM_DEAL_ENTRY entry_type = (ENUM_DEAL_ENTRY)HistoryDealGetInteger(deal_ticket, DEAL_ENTRY);
+        long ticket = HistoryDealGetInteger(deal_ticket, DEAL_POSITION_ID);
+
+        if(entry_type != DEAL_ENTRY_IN && ticket == ticketid)
+        {
+            return long(deal_ticket);
+        }
+    }
+
+    return INVALID_HANDLE;
+}
+
+
+//+------------------------------------------------------------------+
+//|                                                                  |
+//+------------------------------------------------------------------+
+
+string ToUpper(string str) {
+    if (StringToUpper(str)) {
+        return str;
+    } else {
+        Print("Falha ao converter a string para maiúsculas.");
+        return str;
+    }
+}
+
+
+//+------------------------------------------------------------------+
