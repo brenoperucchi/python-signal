@@ -92,3 +92,18 @@ The `--environment` option accepts `local`, `development`, or `production`. Envi
 ## Public Release Notes
 
 This repository was prepared as the public client/MQL side of MT5 Web Replicator. Local runtime files, editor workspaces, Telegram database files, and hardcoded credentials are intentionally excluded.
+
+## License
+
+This project is **source-available** under the [PolyForm Noncommercial License 1.0.0](LICENSE.md), the same terms as [MT5 Web Replicator](https://github.com/brenoperucchi/mt5-web-replicator).
+
+- **Free for noncommercial use.** You can read, run, test, modify and share it for personal use, study, research, evaluation, or at a nonprofit, school or public institution.
+- **Commercial use needs a separate license.** This includes running the EAs or client for a business, offering copy trading as a service, or managing paying customers' accounts. Contact bperucchi@gmail.com to discuss terms.
+
+## Contributing
+
+Pull requests are welcome, including improvements to the EAs (order handling, symbol mapping, lot scaling, reconnect logic) and the Python client. Before your first pull request can be merged, you will be asked to sign the [Contributor License Agreement](CLA.md) by leaving a comment on the pull request. It keeps the project able to offer commercial licenses while your contribution stays credited to you.
+
+## Partnership
+
+Interested in collaborating on this project or building something on top of it commercially? Get in touch at bperucchi@gmail.com.
