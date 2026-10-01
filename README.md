@@ -1,5 +1,10 @@
 # Python Signal
 
+[![CI](https://github.com/brenoperucchi/python-signal/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/brenoperucchi/python-signal/actions/workflows/ci.yml)
+[![Python](https://img.shields.io/badge/python-3.10%20%7C%203.11%20%7C%203.12%20%7C%203.13-3776AB?logo=python&logoColor=white)](.github/workflows/ci.yml)
+[![MQL5](https://img.shields.io/badge/MetaTrader-MQL4%20%7C%20MQL5-4A76A8)](MQL)
+[![License: PolyForm Noncommercial](https://img.shields.io/badge/license-PolyForm%20Noncommercial%201.0.0-blue)](LICENSE.md)
+
 Python Signal contains the Python utilities and MQL4/MQL5 Expert Advisor source used by the MT5 Web Replicator stack. It is the terminal/client-side companion to the Rails backend in [`mt5-web-replicator`](https://github.com/brenoperucchi/mt5-web-replicator).
 
 The codebase includes:
