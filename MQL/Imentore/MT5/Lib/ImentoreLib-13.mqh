@@ -38,6 +38,19 @@ ulong TimeAgoApiDown     = 0;
 ulong TimeElaspedAccount = 300000;
 ulong TimeElaspedApiDown = 60000;
 
+// Symbol mapping (slave): set by the slave expert in OnInit, see SlaveSymbolInit()
+string   SlaveSymbolMapping      = "";            // Explicit map "MASTER=SLAVE;MASTER2=SLAVE2"
+string   SlaveSymbolPrefix       = "";            // Prefix used by the slave broker (ex: "m.")
+string   SlaveSymbolSuffix       = "";            // Suffix used by the slave broker (ex: ".m", "pro")
+bool     SlaveSymbolAutoDetect   = true;          // Search slave symbols with the same base name
+long     SlaveSymbolRetrySeconds = 60;            // Retry unresolved symbols after N seconds
+
+string   SlaveSymbolMapFrom[];
+string   SlaveSymbolMapTo[];
+string   SlaveSymbolCacheFrom[];
+string   SlaveSymbolCacheTo[];
+datetime SlaveSymbolCacheTime[];
+
 //+------------------------------------------------------------------+
 //+ Objects                                                          +
 //+------------------------------------------------------------------+
@@ -1275,7 +1288,7 @@ int UpdateSlavePositionOrders(){
     if (ArraySize(orderdataparse) < 17) // check for sufficient data
       return -4;                        // error code indicating insufficient dat
       
-    string symbol                    = orderdataparse[12];
+    string symbol                    = ResolveSlaveSymbol(orderdataparse[12]);
     long    digits                   = GetSymbolDigits(symbol);
     PositionOrders[i].ticketSlave    = StringToInteger(orderdataparse[2]);
     PositionOrders[i].ticketMaster   = StringToInteger(orderdataparse[1]);
@@ -1292,8 +1305,8 @@ int UpdateSlavePositionOrders(){
     PositionOrders[i].commission     = 0;
     PositionOrders[i].swap           = 0;
     PositionOrders[i].entry          = 0;
-    PositionOrders[i].stopLoss       = NormalizeNumber(orderdataparse[9], orderdataparse[12]);
-    PositionOrders[i].takeProfit     = NormalizeNumber(orderdataparse[10], orderdataparse[12]);
+    PositionOrders[i].stopLoss       = NormalizeNumber(orderdataparse[9], symbol);
+    PositionOrders[i].takeProfit     = NormalizeNumber(orderdataparse[10], symbol);
     PositionOrders[i].state          = orderdataparse[11];
     //PositionOrders[i].mae            = 0;
     //PositionOrders[i].mfe            = 0;
@@ -1427,6 +1440,248 @@ long GetSymbolDigits(string symbol){
     digits = 2;
   
   return digits;
+}
+
+//+------------------------------------------------------------------+
+//+ Symbol Mapping (slave)                                           +
+//+------------------------------------------------------------------+
+// Parses SlaveSymbolMapping ("XAUUSD=GOLD;US30=DJ30") and clears the cache.
+// Call it from OnInit after setting SlaveSymbolMapping/Prefix/Suffix/AutoDetect.
+void SlaveSymbolInit(){
+  ArrayFree(SlaveSymbolMapFrom);
+  ArrayFree(SlaveSymbolMapTo);
+  ArrayFree(SlaveSymbolCacheFrom);
+  ArrayFree(SlaveSymbolCacheTo);
+  ArrayFree(SlaveSymbolCacheTime);
+
+  string pairs[];
+  int total = 0;
+  if(StringLen(SlaveSymbolMapping) > 0)
+    total = StringSplit(SlaveSymbolMapping, ';', pairs);
+
+  for(int i = 0; i < total; i++){
+    string item = pairs[i];
+    StringTrimLeft(item);
+    StringTrimRight(item);
+    if(StringLen(item) == 0)
+      continue;
+
+    string pair[];
+    string from = "";
+    string to   = "";
+    if(StringSplit(item, '=', pair) == 2){
+      from = pair[0];
+      to   = pair[1];
+      StringTrimLeft(from);
+      StringTrimRight(from);
+      StringTrimLeft(to);
+      StringTrimRight(to);
+    }
+    if(StringLen(from) == 0 || StringLen(to) == 0){
+      AddCommentOnChart("SymbolMapping - Invalid entry ignored: '" + item + "' (expected MASTER=SLAVE)");
+      continue;
+    }
+
+    int size = ArraySize(SlaveSymbolMapFrom);
+    ArrayResize(SlaveSymbolMapFrom, size + 1);
+    ArrayResize(SlaveSymbolMapTo, size + 1);
+    SlaveSymbolMapFrom[size] = ToUpperCase(from);
+    SlaveSymbolMapTo[size]   = to;
+  }
+
+  AddCommentOnChart(StringFormat("SymbolMapping - Entries: %d - Prefix: '%s' - Suffix: '%s' - AutoDetect: %s",
+                                 ArraySize(SlaveSymbolMapFrom), SlaveSymbolPrefix, SlaveSymbolSuffix, string(SlaveSymbolAutoDetect)));
+}
+
+//+------------------------------------------------------------------+
+// Returns the slave broker symbol for a master symbol. Results are cached.
+// When nothing is found the master symbol is returned unchanged (previous behavior).
+string ResolveSlaveSymbol(const string master_symbol){
+  if(StringLen(master_symbol) == 0)
+    return master_symbol;
+
+  int idx = SlaveSymbolCacheFind(master_symbol);
+  if(idx >= 0){
+    string cached = SlaveSymbolCacheTo[idx];
+    if(StringLen(cached) > 0){
+      // Symbol may have been removed from Market Watch (ex: after a disconnect)
+      if(SymbolInfoInteger(cached, SYMBOL_SELECT) == 0)
+        SymbolSelect(cached, true);
+      return cached;
+    }
+    if(long(TimeLocal() - SlaveSymbolCacheTime[idx]) < SlaveSymbolRetrySeconds)
+      return master_symbol;
+  }
+
+  bool   first_time = (idx < 0);
+  string how        = "";
+  string resolved   = SlaveSymbolFind(master_symbol, how);
+
+  if(first_time){
+    idx = ArraySize(SlaveSymbolCacheFrom);
+    ArrayResize(SlaveSymbolCacheFrom, idx + 1);
+    ArrayResize(SlaveSymbolCacheTo, idx + 1);
+    ArrayResize(SlaveSymbolCacheTime, idx + 1);
+    SlaveSymbolCacheFrom[idx] = master_symbol;
+  }
+  SlaveSymbolCacheTo[idx]   = resolved;
+  SlaveSymbolCacheTime[idx] = TimeLocal();
+
+  if(StringLen(resolved) > 0){
+    SymbolSelect(resolved, true);
+    if(resolved != master_symbol)
+      AddCommentOnChart("SymbolMapping - " + master_symbol + " -> " + resolved + " (" + how + ")");
+    return resolved;
+  }
+
+  if(first_time)
+    AddCommentOnChart("SymbolMapping - Symbol " + master_symbol + " not found on this broker. Set InputSymbolMapping (ex: " + master_symbol + "=BROKER_SYMBOL) or InputSymbolPrefix/InputSymbolSuffix.");
+
+  return master_symbol;
+}
+
+//+------------------------------------------------------------------+
+// Order: explicit mapping, prefix/suffix, exact name, auto detect.
+string SlaveSymbolFind(const string master_symbol, string &how){
+  string key = ToUpperCase(master_symbol);
+  for(int i = 0; i < ArraySize(SlaveSymbolMapFrom); i++){
+    if(SlaveSymbolMapFrom[i] != key)
+      continue;
+    if(SlaveSymbolExists(SlaveSymbolMapTo[i])){
+      how = "mapping";
+      return SlaveSymbolMapTo[i];
+    }
+    AddCommentOnChart("SymbolMapping - Mapped symbol " + SlaveSymbolMapTo[i] + " for " + master_symbol + " does not exist on this broker");
+    break;
+  }
+
+  if(StringLen(SlaveSymbolPrefix) > 0 || StringLen(SlaveSymbolSuffix) > 0){
+    string candidate = SlaveSymbolPrefix + master_symbol + SlaveSymbolSuffix;
+    if(SlaveSymbolExists(candidate)){
+      how = "prefix/suffix";
+      return candidate;
+    }
+    candidate = SlaveSymbolPrefix + SlaveSymbolBase(master_symbol) + SlaveSymbolSuffix;
+    if(SlaveSymbolExists(candidate)){
+      how = "prefix/suffix";
+      return candidate;
+    }
+  }
+
+  if(SlaveSymbolExists(master_symbol)){
+    how = "exact";
+    return master_symbol;
+  }
+
+  if(SlaveSymbolAutoDetect){
+    string found = SlaveSymbolAutoFind(master_symbol);
+    if(StringLen(found) > 0){
+      how = "auto detect";
+      return found;
+    }
+  }
+
+  return "";
+}
+
+//+------------------------------------------------------------------+
+// Looks for a tradeable symbol with the same base name, ex: EURUSD -> EURUSD.m / EURUSDpro
+string SlaveSymbolAutoFind(const string master_symbol){
+  string base = SlaveSymbolBase(master_symbol);
+  if(StringLen(base) < 3)
+    return "";
+
+  string best       = "";
+  int    best_score = 1000;
+  int    matches    = 0;
+  int    total      = SymbolsTotal(false);
+
+  for(int i = 0; i < total; i++){
+    string name = SymbolName(i, false);
+    if(SymbolInfoInteger(name, SYMBOL_TRADE_MODE) == SYMBOL_TRADE_MODE_DISABLED)
+      continue;
+
+    string name_base = SlaveSymbolBase(name);
+    int    score     = -1;
+    if(name_base == base)
+      score = 0;
+    else if(SlaveSymbolTailOk(name_base, base))
+      score = StringLen(name_base) - StringLen(base);
+    else if(SlaveSymbolTailOk(base, name_base))
+      score = StringLen(base) - StringLen(name_base);
+
+    if(score < 0)
+      continue;
+
+    matches++;
+    if(score < best_score){
+      best       = name;
+      best_score = score;
+    }
+  }
+
+  if(matches > 1)
+    AddCommentOnChart(StringFormat("SymbolMapping - %d candidates for %s, using %s. Use InputSymbolMapping to choose another one.", matches, master_symbol, best));
+
+  return best;
+}
+
+//+------------------------------------------------------------------+
+// true when longer == shorter + 1..4 letters (ex: EURUSDPRO / EURUSD). Digits are rejected (US30 / US300).
+bool SlaveSymbolTailOk(const string longer, const string shorter){
+  int len_long  = StringLen(longer);
+  int len_short = StringLen(shorter);
+  int tail      = len_long - len_short;
+
+  if(len_short < 3 || tail < 1 || tail > 4)
+    return false;
+  if(StringSubstr(longer, 0, len_short) != shorter)
+    return false;
+
+  for(int i = len_short; i < len_long; i++){
+    ushort c = StringGetCharacter(longer, i);
+    if(c < 'A' || c > 'Z')
+      return false;
+  }
+  return true;
+}
+
+//+------------------------------------------------------------------+
+// Upper case alphanumeric core of a symbol: "EURUSD.m" -> "EURUSD", "#US30" -> "US30"
+string SlaveSymbolBase(const string symbol){
+  int len   = StringLen(symbol);
+  int start = 0;
+  while(start < len && !SlaveSymbolIsAlnum(StringGetCharacter(symbol, start)))
+    start++;
+
+  int end = start;
+  while(end < len && SlaveSymbolIsAlnum(StringGetCharacter(symbol, end)))
+    end++;
+
+  if(end <= start)
+    return "";
+
+  return ToUpperCase(StringSubstr(symbol, start, end - start));
+}
+
+//+------------------------------------------------------------------+
+bool SlaveSymbolIsAlnum(const ushort c){
+  return ((c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z'));
+}
+
+//+------------------------------------------------------------------+
+bool SlaveSymbolExists(const string symbol){
+  bool is_custom = false;
+  return (StringLen(symbol) > 0 && SymbolExist(symbol, is_custom));
+}
+
+//+------------------------------------------------------------------+
+int SlaveSymbolCacheFind(const string master_symbol){
+  for(int i = 0; i < ArraySize(SlaveSymbolCacheFrom); i++){
+    if(SlaveSymbolCacheFrom[i] == master_symbol)
+      return i;
+  }
+  return -1;
 }
 
 ////+------------------------------------------------------------------+

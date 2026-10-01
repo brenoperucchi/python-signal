@@ -27,6 +27,10 @@ Settings* AppSettings = Settings::Instance();
 
 //+-Input-----------------------------------------------------------------------+
 input bool InputEnvironmentLocal         = true; // Admin only (default: false)
+input string InputSymbolMapping          = "";   // Symbol mapping MASTER=SLAVE (ex: XAUUSD=GOLD;US30=DJ30)
+input string InputSymbolPrefix           = "";   // Slave broker symbol prefix (ex: m.)
+input string InputSymbolSuffix           = "";   // Slave broker symbol suffix (ex: .m, pro)
+input bool   InputSymbolAutoDetect       = false; // Auto detect slave symbol (EURUSD -> EURUSD.m)
 bool InputSendSLTPChanges          = true;  // Send Change Order Pending to Server (default: true)
 bool InputChangePriceOpenOnPending = true;  // Ajust Price Open for Pending Orders
 
@@ -78,6 +82,12 @@ int OnInit(){
   
   SetLogFileName();
   SetCommentImentore(true, true);
+
+  SlaveSymbolMapping    = InputSymbolMapping;
+  SlaveSymbolPrefix     = InputSymbolPrefix;
+  SlaveSymbolSuffix     = InputSymbolSuffix;
+  SlaveSymbolAutoDetect = InputSymbolAutoDetect;
+  SlaveSymbolInit();
   
   AddCommentOnChart(AppSettings.accountName + " - " + AppSettings.accountLogin + " - " + AppSettings.accountServerName + " - " + AccountMarginMode() + " - " + ((AppSettings.appEnvironmentLocal || InputEnvironmentLocal) ? "Local" : "Produção"), 3);
   
